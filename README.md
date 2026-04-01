@@ -33,7 +33,7 @@ Built on top of **Vite**, **React**, and **WebContainers**, Southstack provides 
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/mubtasimfuad/southstack.git
+   git clone https://github.com/mubtasimfuad7/southstack.git
    cd southstack
    ```
 
