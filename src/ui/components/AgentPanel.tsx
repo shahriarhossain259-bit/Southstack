@@ -14,6 +14,9 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { useAgentStore } from '@/application/store'
 import type { AgentStatus, AgentStep } from '@/core/interfaces/IAgentService'
+import { initializeAgentRuntime, retryLocalModel, runAgent } from '@/application/agentRuntime'
+import { LOCAL_MODEL_OPTIONS, localModelProvider } from '@/execution/llm/LocalModelProvider'
+import type { AgentService } from '@/core/services/AgentService'
 
 function StatusBadge({ status }: { status: AgentStatus }) {
   const config: Record<AgentStatus, { label: string; color: string; icon: React.ReactNode }> = {
@@ -109,10 +112,7 @@ function CodeBlock({ language, value }: { language: string; value: string }) {
 }
 
 function ChatMessage({ role, content }: ChatMessageProps) {
-  // Clean assistant response to hide technical JSON and show only the natural language part
-  const displayContent = role === 'assistant' 
-    ? content.split(/```json|\{/)[0].trim()
-    : content;
+  const displayContent = role === 'assistant' ? getAssistantDisplayContent(content) : content
 
   if (!displayContent && role === 'assistant') return null;
 
@@ -160,54 +160,66 @@ function ChatMessage({ role, content }: ChatMessageProps) {
   )
 }
 
+function getAssistantDisplayContent(content: string): string {
+  const jsonBlock = content.match(/```json\s*([\s\S]*?)\s*```/i)?.[1]
+    ?? content.match(/^\s*(\{[\s\S]*\})\s*$/)?.[1]
+
+  if (jsonBlock) {
+    try {
+      const response = JSON.parse(jsonBlock) as {
+        summary?: unknown
+        current_step?: unknown
+        action?: { tool?: unknown }
+        status?: unknown
+      }
+      if (typeof response.summary === 'string' && response.summary.trim()) return response.summary.trim()
+      if (response.status === 'done') return 'Task complete.'
+      const step = typeof response.current_step === 'string' ? response.current_step.trim() : ''
+      const tool = typeof response.action?.tool === 'string' ? response.action.tool.replace(/_/g, ' ') : ''
+      if (step) return tool && tool !== 'none' ? `${step} (${tool})` : step
+      if (tool && tool !== 'none') return `Working with ${tool}.`
+      return response.status === 'error' ? 'The agent reported an error.' : 'Working on your request…'
+    } catch {
+      // Do not hide a malformed response from a small local model behind a
+      // permanent generic status message.
+      return content.trim() || 'Working on your request…'
+    }
+  }
+
+  const prose = content.replace(/```json[\s\S]*$/i, '').trim()
+  return prose || 'Working on your request…'
+}
+
 export function AgentPanel() {
   const {
-    status, plan, messages, modelReady, modelProgress, modelProgressText,
-    addMessage, setStatus
+    status, plan, messages, modelReady, modelError, modelProgress, modelProgressText,
+    setModelError, setModelProgress, setModelReady
   } = useAgentStore()
 
   const [input, setInput] = useState('')
   const [showPlan, setShowPlan] = useState(true)
+  const [selectedModel, setSelectedModel] = useState(localModelProvider.getModelName())
+  const [isChangingModel, setIsChangingModel] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // Lazy-import agentService to avoid circular deps
-  const [agentService, setAgentService] = useState<import('@/core/services/AgentService').AgentService | null>(null)
+  const [agentService, setAgentService] = useState<AgentService | null>(null)
 
   useEffect(() => {
+    let cancelled = false
+
     async function bootstrap() {
-      const { localModelProvider } = await import('@/execution/llm/LocalModelProvider')
-      const { AgentService } = await import('@/core/services/AgentService')
-      const { buildAgentTools } = await import('@/application/agentTools')
-      const { useAgentStore: store } = await import('@/application/store')
-
-      localModelProvider.onLoadProgress((p, text) => {
-        store.getState().setModelProgress(p, text)
-      })
-
-      const svc = new AgentService(localModelProvider)
-      buildAgentTools().forEach((t) => svc.registerTool(t))
-
-      svc.onStatusChange((s) => store.getState().setStatus(s))
-      svc.onPlanUpdate((steps) => store.getState().setPlan(steps))
-      svc.onMessage((msg, role) => {
-        if (role === 'assistant') {
-          store.getState().appendToLastAssistantMessage(msg)
-        } else {
-          store.getState().addMessage(role, msg)
-        }
-      })
-
-      setAgentService(svc)
-
-      // Initialize model in background
       try {
-        await localModelProvider.initialize()
-        store.getState().setModelReady(true)
+        const service = await initializeAgentRuntime()
+        if (!cancelled) setAgentService(service)
       } catch (err) {
         console.error('Model init failed:', err)
       }
     }
-    bootstrap()
+    void bootstrap()
+
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {
@@ -218,24 +230,66 @@ export function AgentPanel() {
     if (!input.trim() || !agentService) return
     const prompt = input.trim()
     setInput('')
-    // DO NOT addMessage here anymore! AgentService.start() will emit 'user' message, 
-    // and the listener in useEffect will handle it correctly without duplication.
-    await agentService.start(prompt)
+    await runAgent(prompt)
+  }
+
+  async function retryModel() {
+    setModelReady(false)
+    setModelError(null)
+    setModelProgress(0, 'Retrying the local AI model…')
+    try {
+      await retryLocalModel()
+      setModelReady(true)
+    } catch (err) {
+      setModelError(err instanceof Error ? err.message : 'The local AI model could not be loaded.')
+    }
+  }
+
+  async function changeModel(modelName: string) {
+    if (modelName === localModelProvider.getModelName() && modelReady) return
+
+    setSelectedModel(modelName)
+    setIsChangingModel(true)
+    setModelReady(false)
+    setModelError(null)
+    setModelProgress(0, 'Loading selected model…')
+    try {
+      await localModelProvider.setModelName(modelName)
+      setModelReady(true)
+      setModelError(null)
+    } catch (err) {
+      setModelError(err instanceof Error ? err.message : 'The selected local model could not be loaded.')
+    } finally {
+      setIsChangingModel(false)
+    }
   }
 
   return (
     <div className="flex flex-col h-full bg-panel border-l border-border">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border flex-shrink-0">
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border flex-shrink-0">
         <div className="flex items-center gap-2">
           <div className={`w-1.5 h-1.5 rounded-full ${modelReady ? 'bg-success animate-pulse-slow' : 'bg-warning animate-pulse'}`} />
           <span className="text-xs font-semibold text-text-secondary uppercase tracking-widest">AI Agent</span>
         </div>
-        <StatusBadge status={status} />
+        <div className="flex min-w-0 items-center gap-2">
+          <select
+            value={selectedModel}
+            onChange={(event) => void changeModel(event.target.value)}
+            disabled={isChangingModel || (status !== 'idle' && status !== 'done' && status !== 'error')}
+            title="Choose the local AI model"
+            className="max-w-36 rounded border border-border bg-surface-300 px-1.5 py-1 text-[10px] text-text-secondary outline-none focus:border-primary-400/60 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {LOCAL_MODEL_OPTIONS.map((model) => (
+              <option key={model.id} value={model.id} title={model.description}>{model.label}</option>
+            ))}
+          </select>
+          <StatusBadge status={status} />
+        </div>
       </div>
 
       {/* Model loading progress */}
-      {!modelReady && (
+      {!modelReady && !modelError && (
         <div className="px-3 py-2 border-b border-border flex-shrink-0">
           <div className="flex items-center justify-between mb-1">
             <span className="text-[10px] text-text-dim truncate">{modelProgressText || 'Loading model…'}</span>
@@ -247,6 +301,13 @@ export function AgentPanel() {
               style={{ width: `${modelProgress * 100}%` }}
             />
           </div>
+        </div>
+      )}
+
+      {modelError && (
+        <div className="flex items-center justify-between gap-3 border-b border-error/30 bg-error/5 px-3 py-2">
+          <p className="min-w-0 text-[10px] leading-relaxed text-error">{modelError}</p>
+          <button onClick={() => void retryModel()} className="shrink-0 rounded border border-error/40 px-2 py-1 text-[10px] font-medium text-error transition-colors hover:bg-error/10">Retry</button>
         </div>
       )}
 
@@ -354,7 +415,7 @@ export function AgentPanel() {
           )}
         </div>
         <p className="text-[10px] text-text-dim mt-1.5 text-center">
-          Shift+Enter for newline • Enter to send • Qwen2.5-Coder (offline)
+          Shift+Enter for newline • Enter to send • {LOCAL_MODEL_OPTIONS.find((model) => model.id === selectedModel)?.label ?? 'Local AI'} (offline)
         </p>
       </div>
     </div>

@@ -11,18 +11,26 @@ import { FileExplorer } from './components/FileExplorer'
 import { EditorPane } from './components/EditorPane'
 import { TerminalPanel } from './components/TerminalPanel'
 import { AgentPanel } from './components/AgentPanel'
+import { UIBuilderPanel } from './components/UIBuilderPanel'
+import { P2PPanel } from './components/P2PPanel'
 import { HorizontalSplit, VerticalSplit } from './components/SplitPane'
-import { useTerminalStore, useFSStore } from '@/application/store'
+import { useTerminalStore, useFSStore, useUIBuilderStore } from '@/application/store'
 import { runtimeService } from '@/core/services/RuntimeService'
 import { fileSystemService } from '@/core/services/FileSystemService'
 import { RestorePrompt } from './components/RestorePrompt'
 import { loadMeta } from '@/infrastructure/fs/idb-storage'
+import { initializeAgentRuntime } from '@/application/agentRuntime'
 
 export function App() {
   const [agentPanelOpen, setAgentPanelOpen] = useState(true)
   const [showRestore, setShowRestore] = useState(false)
   const { isOpen: terminalOpen, setOpen: setTerminalOpen } = useTerminalStore()
   const { projectRoot } = useFSStore()
+  const { isP2POpen, setP2POpen } = useUIBuilderStore()
+
+  useEffect(() => {
+    void initializeAgentRuntime()
+  }, [])
 
   // Sync projectRoot to WebContainer
   useEffect(() => {
@@ -127,6 +135,8 @@ export function App() {
           maxLeft={450}
         />
       </div>
+      <UIBuilderPanel />
+      <P2PPanel isOpen={isP2POpen} onClose={() => setP2POpen(false)} />
     </div>
   )
 }

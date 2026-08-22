@@ -12,9 +12,9 @@ export interface BuiltContext {
   tokenEstimate: number
 }
 
-const MAX_FILE_CHARS = 4000
-const MAX_TERMINAL_CHARS = 2000
-const MAX_OPEN_FILES = 3
+const MAX_FILE_CHARS = 1800
+const MAX_TERMINAL_CHARS = 800
+const MAX_OPEN_FILES = 2
 
 export class ContextBuilder {
   private recentTerminalOutput = ''
@@ -140,10 +140,11 @@ Work Strategy:
 Rules:
 - The project root is ALWAYS \`/\`. DO NOT use absolute OS paths like \`/home/gak.../\`. For a file named \`main.c\`, the path is simply \`/main.c\`.
 - **NO PLACEHOLDERS**: Provide full, exact, and executable source code on every write. Summarization is prohibited.
-- **AGENTIC JSON**: You MUST provide your plan and action in a SINGLE JSON block at the end of every message. This block is MANDATORY to trigger tools. The JSON block must match this EXACT schema:
+- **AGENTIC JSON**: Return exactly one JSON object and no markdown fences. It is mandatory to trigger tools and must match this schema. Make \`summary\` a short, user-facing update that explains what you are doing or what you completed:
  
 \`\`\`json
 {
+  "summary": "short user-facing update",
   "plan": ["step 1", "step 2"],
   "current_step": "step 1",
   "action": { "tool": "tool_name", "input": { "key": "value" } },

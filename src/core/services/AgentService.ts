@@ -7,6 +7,7 @@
 import type {
   IAgentService,
   AgentStatus,
+  AgentAction,
   AgentTool,
   AgentStep,
   AgentResponse,
@@ -42,6 +43,7 @@ export class AgentService implements IAgentService {
     this.isPaused = false
     this.plan = []
     this.currentStepIndex = -1
+    this.history = []
 
     this._setStatus('planning')
     this._emit('user', userPrompt)
@@ -49,13 +51,14 @@ export class AgentService implements IAgentService {
     // PROACTIVE GROUNDING: Inject the file tree into the first turn
     const { fileSystemService } = await import('./FileSystemService')
     const tree = await fileSystemService.getTree()
-    const treeContext = `[Project Context]: Current file tree structure:\n${JSON.stringify(tree, null, 2).slice(0, 2000)}`
+    const treeContext = `[Project Context]: Current file tree structure:\n${JSON.stringify(tree, null, 2).slice(0, 900)}`
     
-    this.history.push({ role: 'user', content: `${treeContext}\n\n[User Request]: ${userPrompt}` })
+    this._remember('user', `${treeContext}\n\n[User Request]: ${userPrompt}`)
 
     try {
       await this._runLoop(userPrompt)
     } catch (err) {
+      if (this.isStopped) return
       this._setStatus('error')
       this._emit('assistant', `Error: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -125,11 +128,17 @@ export class AgentService implements IAgentService {
       let rawResponse = ''
       this._setStatus(iterations === 0 ? 'planning' : 'executing')
 
+      // Keep each model turn in its own chat message. Without this marker,
+      // consecutive JSON tool calls are merged and become impossible to read.
+      this._emit('assistant', '')
+
       // Stream tokens to chat
-      rawResponse = await this.modelProvider.generateStream(context.messages, (token) => {
-        this._emit('assistant', token)
-      })
-      this.history.push({ role: 'assistant', content: rawResponse })
+      rawResponse = await this.modelProvider.generateStream(
+        context.messages,
+        (token) => this._emit('assistant', token),
+        { maxTokens: 512, temperature: 0.1 },
+      )
+      if (this.isStopped) return
 
       // Parse response
       let agentResponse: AgentResponse
@@ -150,6 +159,7 @@ export class AgentService implements IAgentService {
           return
         }
       }
+      this._remember('assistant', rawResponse)
 
       // Initialize plan on first iteration
       if (iterations === 0 && agentResponse.plan.length > 0) {
@@ -175,7 +185,7 @@ export class AgentService implements IAgentService {
       const tool = this.tools.get(agentResponse.action.tool)
       if (!tool) {
         const errorMsg = `Tool "${agentResponse.action.tool}" is not available. Choose from: ${toolNames.join(', ')}`
-        this.history.push({ role: 'user', content: errorMsg })
+        this._remember('user', errorMsg)
         iterations++
         continue
       }
@@ -201,7 +211,7 @@ export class AgentService implements IAgentService {
         // REFLECT: tell model what happened
         this._setStatus('reflecting')
         const resultFeedback = `Action "${agentResponse.action.tool}" completed successfully. Result: ${JSON.stringify(lastResult).slice(0, 500)}`
-        this.history.push({ role: 'user', content: resultFeedback })
+        this._remember('user', resultFeedback)
 
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err)
@@ -214,7 +224,7 @@ export class AgentService implements IAgentService {
 
         // Feed error back to agent for self-correction
         const errorFeedback = `Action "${agentResponse.action.tool}" failed with error: ${errorMsg}. Analyze the error and try a different approach.`
-        this.history.push({ role: 'user', content: errorFeedback })
+        this._remember('user', errorFeedback)
       }
 
       iterations++
@@ -232,10 +242,14 @@ export class AgentService implements IAgentService {
       throw new Error('No JSON block found in response.')
     }
 
-    const parsed = JSON.parse(rawJson.trim())
+    const parsed = JSON.parse(rawJson.trim()) as Partial<AgentResponse>
 
     if (!parsed.status) {
       throw new Error('Missing required field: status')
+    }
+
+    if (!['planning', 'executing', 'reflecting', 'done', 'error'].includes(parsed.status)) {
+      throw new Error('Invalid status returned by model.')
     }
 
     // Default action if omitted for 'done'
@@ -251,7 +265,13 @@ export class AgentService implements IAgentService {
       parsed.action.input = {}
     }
 
-    return parsed as AgentResponse
+    return {
+      plan: Array.isArray(parsed.plan) ? parsed.plan.filter((step): step is string => typeof step === 'string') : [],
+      current_step: typeof parsed.current_step === 'string' ? parsed.current_step : '',
+      action: parsed.action as AgentAction,
+      status: parsed.status,
+      summary: typeof parsed.summary === 'string' ? parsed.summary : undefined,
+    }
   }
 
   private _setStatus(status: AgentStatus): void {
@@ -265,6 +285,19 @@ export class AgentService implements IAgentService {
 
   private _emitPlan(): void {
     this.planListeners.forEach((cb) => cb([...this.plan]))
+  }
+
+  private _remember(role: 'user' | 'assistant' | 'tool', content: string): void {
+    const MAX_HISTORY_ITEMS = 5
+    const MAX_ITEM_CHARS = 1200
+    const compactContent = content.length > MAX_ITEM_CHARS
+      ? `${content.slice(0, MAX_ITEM_CHARS)}\n[Earlier content omitted to keep the local model responsive.]`
+      : content
+
+    this.history.push({ role, content: compactContent })
+    if (this.history.length > MAX_HISTORY_ITEMS) {
+      this.history = [this.history[0], ...this.history.slice(-(MAX_HISTORY_ITEMS - 1))]
+    }
   }
 
   private _sleep(ms: number): Promise<void> {

@@ -4,11 +4,15 @@
 // Model is cached in IndexedDB by web-llm automatically.
 // ============================================================
 
-import { MLCEngine } from '@mlc-ai/web-llm'
+import { CreateMLCEngine, type MLCEngine } from '@mlc-ai/web-llm'
 
 let engine: MLCEngine | null = null
 let currentModel: string | null = null
+let modelLoadPromise: Promise<void> | null = null
 let currentAbortController: AbortController | null = null
+// Small local models are much more responsive with a bounded context. The
+// application already trims the project/history before requests reach here.
+const CONTEXT_WINDOW_SIZE = 2048
 
 self.onmessage = async (e: MessageEvent) => {
   const { type, ...data } = e.data
@@ -25,40 +29,67 @@ self.onmessage = async (e: MessageEvent) => {
         currentAbortController.abort()
         currentAbortController = null
       }
+      // AbortController only stops our token loop. Tell WebLLM to interrupt
+      // the active GPU generation too so a cancelled request cannot keep the
+      // engine locked for the next prompt.
+      try {
+        await engine?.interruptGenerate()
+      } catch {
+        // A request may finish between the abort event and this call.
+      }
       break
   }
 }
 
 async function handleInit(modelName: string) {
   try {
-    // If engine is already loaded with the requested model, just emit ready
+    // If the requested model is already available, no reload is necessary.
     if (engine && currentModel === modelName) {
       self.postMessage({ type: 'ready' })
       return
     }
 
-    if (!engine) {
-      engine = new MLCEngine()
+    // Multiple init messages may arrive before the first load finishes. Let
+    // them share that load instead of creating competing engines.
+    if (modelLoadPromise) {
+      await modelLoadPromise
+      if (engine && currentModel === modelName) {
+        self.postMessage({ type: 'ready' })
+        return
+      }
     }
 
-    engine.setInitProgressCallback((report) => {
-      self.postMessage({
-        type: 'progress',
-        progress: report.progress,
-        text: report.text,
-      })
-    })
+    modelLoadPromise = (async () => {
+      // CreateMLCEngine resolves only after reload() has finished. Keeping the
+      // engine assignment inside this promise prevents completions from using
+      // an engine before its model is loaded.
+      engine = await CreateMLCEngine(
+        modelName,
+        {
+          initProgressCallback: (report) => {
+            self.postMessage({
+              type: 'progress',
+              progress: report.progress,
+              text: report.text,
+            })
+          },
+        },
+        { context_window_size: CONTEXT_WINDOW_SIZE },
+      )
+      currentModel = modelName
+    })()
 
-    // reload() uses WebLLM's internal MLCEngine caching logic 
-    // which persists weight blocks in IndexedDB.
-    await engine.reload(modelName)
-    currentModel = modelName
+    await modelLoadPromise
     self.postMessage({ type: 'ready' })
   } catch (err) {
+    engine = null
+    currentModel = null
     self.postMessage({
       type: 'error',
       error: err instanceof Error ? err.message : String(err),
     })
+  } finally {
+    modelLoadPromise = null
   }
 }
 
@@ -68,8 +99,23 @@ async function handleGenerate(data: {
   maxTokens: number
   temperature: number
 }) {
-  if (!engine) {
-    self.postMessage({ type: 'error', requestId: data.requestId, error: 'Engine not initialized' })
+  // A completion can be posted immediately after init. Wait for that load
+  // instead of invoking WebLLM while reload() is still in progress.
+  if (modelLoadPromise) {
+    try {
+      await modelLoadPromise
+    } catch {
+      // The initialization failure is reported by handleInit.
+    }
+  }
+
+  const loadedEngine = engine
+  if (!loadedEngine || !currentModel) {
+    self.postMessage({
+      type: 'error',
+      requestId: data.requestId,
+      error: 'Model is not loaded. Wait for model initialization to finish and try again.',
+    })
     return
   }
 
@@ -80,11 +126,11 @@ async function handleGenerate(data: {
   try {
     let fullText = ''
 
-    const chunks = await engine.chat.completions.create({
+    const chunks = await loadedEngine.chat.completions.create({
       messages: data.messages,
-      max_tokens: data.maxTokens,
+      max_tokens: Math.min(data.maxTokens, 512),
       temperature: data.temperature,
-      stream: true
+      stream: true,
     })
 
     for await (const chunk of chunks) {

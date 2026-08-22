@@ -2,8 +2,8 @@
 // UI LAYER: MenuBar — top bar with project open/sync actions
 // ============================================================
 
-import { FolderOpen, Save, RefreshCw, Bot, Terminal, Settings, Shield, ShieldAlert, ShieldCheck } from 'lucide-react'
-import { useFSStore } from '@/application/store'
+import { FolderOpen, Save, RefreshCw, Bot, Terminal, Settings, Shield, ShieldAlert, ShieldCheck, LayoutPanelLeft, Users } from 'lucide-react'
+import { useFSStore, useUIBuilderStore } from '@/application/store'
 import { fileSystemService } from '@/core/services/FileSystemService'
 import { editorService } from '@/core/services/EditorService'
 
@@ -16,6 +16,7 @@ interface MenuBarProps {
 
 export function MenuBar({ onToggleAgent, onToggleTerminal, agentPanelOpen, terminalOpen }: MenuBarProps) {
   const { setProjectRoot, setLoading, setSyncing, setHasLocalAccess, isSyncing, isLoading } = useFSStore()
+  const { isOpen: uiBuilderOpen, setOpen: setUiBuilderOpen, isP2POpen, setP2POpen } = useUIBuilderStore()
 
   async function handleOpenProject() {
     try {
@@ -114,6 +115,36 @@ export function MenuBar({ onToggleAgent, onToggleTerminal, agentPanelOpen, termi
         >
           <Bot size={13} />
           AI Agent
+        </button>
+
+        <div className="w-px h-4 bg-border mx-1" />
+
+        <button
+          onClick={() => {
+            setUiBuilderOpen(!uiBuilderOpen)
+            setP2POpen(false)
+          }}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs transition-colors ${
+            uiBuilderOpen ? 'text-accent-400 bg-accent-400/10' : 'text-text-secondary hover:text-text-primary hover:bg-white/5'
+          }`}
+          title="Toggle UI Builder"
+        >
+          <LayoutPanelLeft size={13} />
+          UI Builder
+        </button>
+
+        <button
+          onClick={() => {
+            setP2POpen(!isP2POpen)
+            setUiBuilderOpen(false)
+          }}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs transition-colors ${
+            isP2POpen ? 'text-accent-400 bg-accent-400/10' : 'text-text-secondary hover:text-text-primary hover:bg-white/5'
+          }`}
+          title="Connect with a collaborator"
+        >
+          <Users size={13} />
+          P2P
         </button>
 
         <div className="w-px h-4 bg-border mx-1" />

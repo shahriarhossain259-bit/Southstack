@@ -133,14 +133,17 @@ interface AgentState {
   plan: AgentStep[]
   messages: ChatMessage[]
   modelReady: boolean
+  modelError: string | null
   modelProgress: number
   modelProgressText: string
   agentPanelOpen: boolean
   setStatus: (s: AgentStatus) => void
   setPlan: (steps: AgentStep[]) => void
   addMessage: (role: 'user' | 'assistant', content: string) => void
+  startAssistantMessage: () => void
   appendToLastAssistantMessage: (token: string) => void
   setModelReady: (v: boolean) => void
+  setModelError: (error: string | null) => void
   setModelProgress: (p: number, text: string) => void
   setAgentPanelOpen: (v: boolean) => void
 }
@@ -150,6 +153,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   plan: [],
   messages: [],
   modelReady: false,
+  modelError: null,
   modelProgress: 0,
   modelProgressText: '',
   agentPanelOpen: true,
@@ -160,6 +164,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       messages: [
         ...state.messages,
         { id: `msg-${Date.now()}`, role, content, timestamp: Date.now() },
+      ],
+    })),
+  startAssistantMessage: () =>
+    set((state) => ({
+      messages: [
+        ...state.messages,
+        { id: `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`, role: 'assistant', content: '', timestamp: Date.now() },
       ],
     })),
   appendToLastAssistantMessage: (token) =>
@@ -174,6 +185,25 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       return { messages }
     }),
   setModelReady: (v) => set({ modelReady: v }),
+  setModelError: (modelError) => set({ modelError }),
   setModelProgress: (p, text) => set({ modelProgress: p, modelProgressText: text }),
   setAgentPanelOpen: (v) => set({ agentPanelOpen: v }),
+}))
+
+// ──────────────────────────────────────────────────────────
+// UI Builder Store
+// ──────────────────────────────────────────────────────────
+
+interface UIBuilderState {
+  isOpen: boolean
+  isP2POpen: boolean
+  setOpen: (v: boolean) => void
+  setP2POpen: (v: boolean) => void
+}
+
+export const useUIBuilderStore = create<UIBuilderState>((set) => ({
+  isOpen: false,
+  isP2POpen: false,
+  setOpen: (v) => set({ isOpen: v }),
+  setP2POpen: (v) => set({ isP2POpen: v }),
 }))

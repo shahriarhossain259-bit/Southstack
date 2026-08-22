@@ -30,6 +30,7 @@ export interface AgentResponse {
   current_step: string
   action: AgentAction
   status: AgentStatus
+  summary?: string
 }
 
 export interface IAgentService {
